@@ -140,15 +140,15 @@ impl BufferView {
         self.shape.len()
     }
 
-    /// Create a reshaped view 
+    /// Create a reshaped view
     /// Only valid for contiguous views
     pub fn reshape(&self, new_shape: Vec<usize>) -> Option<Self> {
         let new_len: usize = new_shape.iter().product();
         if new_len != self.len {
-            return None; 
+            return None;
         }
         if !self.is_contiguous() {
-            return None; 
+            return None;
         }
         Some(BufferView {
             shape: new_shape.clone(),
@@ -310,6 +310,53 @@ impl<R: Runtime> Backend<R> {
 
     pub fn client(&self) -> &ComputeClient<R> {
         &self.client
+    }
+
+    // ========================
+    // Buffer Creation Methods
+    // ========================
+
+    /// Create a buffer from host data with this backend attached
+    pub fn from_data<E: CubeElement + CubePrimitive>(
+        &self,
+        data: &[E],
+        shape: Vec<usize>,
+    ) -> Buffer<R, E> {
+        Buffer::from_data_with_backend(self, data, shape)
+    }
+
+    /// Create an uninitialized buffer with this backend attached
+    pub fn empty<E: CubeElement + CubePrimitive>(&self, shape: Vec<usize>) -> Buffer<R, E> {
+        Buffer::empty_with_backend(self, shape)
+    }
+
+    /// Create a zero-filled buffer with this backend attached
+    pub fn zeros<E: CubeElement + CubePrimitive + cubecl::num_traits::Zero + Clone>(
+        &self,
+        shape: Vec<usize>,
+    ) -> Buffer<R, E> {
+        Buffer::zeros_with_backend(self, shape)
+    }
+
+    /// Create a buffer filled with ones with this backend attached
+    pub fn ones<E: CubeElement + CubePrimitive + cubecl::num_traits::One + Clone>(
+        &self,
+        shape: Vec<usize>,
+    ) -> Buffer<R, E> {
+        let len: usize = shape.iter().product();
+        let data = vec![E::one(); len];
+        self.from_data(&data, shape)
+    }
+
+    /// Create a buffer filled with a specific value with this backend attached
+    pub fn full<E: CubeElement + CubePrimitive + Clone>(
+        &self,
+        shape: Vec<usize>,
+        value: E,
+    ) -> Buffer<R, E> {
+        let len: usize = shape.iter().product();
+        let data = vec![value; len];
+        self.from_data(&data, shape)
     }
 }
 
@@ -478,7 +525,10 @@ impl<R: Runtime, E: CubeElement + CubePrimitive> Buffer<R, E> {
     }
 
     /// Check if this buffer shares storage with another
-    pub fn shares_storage_with<E2: CubeElement + CubePrimitive>(&self, other: &Buffer<R, E2>) -> bool {
+    pub fn shares_storage_with<E2: CubeElement + CubePrimitive>(
+        &self,
+        other: &Buffer<R, E2>,
+    ) -> bool {
         Arc::ptr_eq(&self.storage, &other.storage)
     }
 
@@ -547,11 +597,7 @@ impl<R: Runtime, E: CubeElement + CubePrimitive> Buffer<R, E> {
     /// Squeeze dimensions of size 1
     pub fn squeeze(&self, dim: Option<usize>) -> Self {
         let new_view = self.view.squeeze(dim);
-        Self::from_parts(
-            Arc::clone(&self.storage),
-            new_view,
-            self.backend.clone(),
-        )
+        Self::from_parts(Arc::clone(&self.storage), new_view, self.backend.clone())
     }
 
     /// Unsqueeze (add dimension of size 1)
@@ -678,11 +724,7 @@ impl<R: Runtime, E: CubeElement + CubePrimitive> Buffer<R, E> {
 
 ///!TODO: move this kernel to a proper place
 #[cube(launch_unchecked)]
-pub fn contiguous_kernel<E: CubePrimitive>(
-    input: &Tensor<E>,
-    output: &mut Tensor<E>,
-    offset: u32,
-) {
+pub fn contiguous_kernel<E: CubePrimitive>(input: &Tensor<E>, output: &mut Tensor<E>, offset: u32) {
     if ABSOLUTE_POS < output.len() {
         output[ABSOLUTE_POS] = input[ABSOLUTE_POS + offset as usize];
     }
@@ -772,7 +814,9 @@ impl<R: Runtime> DynBuffer<R> {
     }
 
     /// Try to downcast to a specific buffer type (mutable)
-    pub fn downcast_mut<E: CubeElement + CubePrimitive + 'static>(&mut self) -> Option<&mut Buffer<R, E>> {
+    pub fn downcast_mut<E: CubeElement + CubePrimitive + 'static>(
+        &mut self,
+    ) -> Option<&mut Buffer<R, E>> {
         self.inner.as_any_mut().downcast_mut()
     }
 
@@ -824,17 +868,28 @@ pub enum AllocationStrategy {
 pub struct BufferPool<R: Runtime> {
     /// Available buffers organized by size
     available: std::collections::HashMap<usize, Vec<Handle>>,
-    client: ComputeClient<R>,
+    backend: Backend<R>,
     strategy: AllocationStrategy,
 }
 
 impl<R: Runtime> BufferPool<R> {
-    pub fn new(client: ComputeClient<R>, strategy: AllocationStrategy) -> Self {
+    /// Create a new buffer pool with a Backend context
+    pub fn new(backend: Backend<R>, strategy: AllocationStrategy) -> Self {
         BufferPool {
             available: std::collections::HashMap::new(),
-            client,
+            backend,
             strategy,
         }
+    }
+
+    /// Create a new buffer pool from a raw ComputeClient (wraps in Backend)
+    pub fn from_client(client: ComputeClient<R>, strategy: AllocationStrategy) -> Self {
+        Self::new(Backend::new(client), strategy)
+    }
+
+    /// Get the backend context
+    pub fn backend(&self) -> &Backend<R> {
+        &self.backend
     }
 
     /// Get or allocate a buffer of the given size
@@ -853,7 +908,32 @@ impl<R: Runtime> BufferPool<R> {
             }
         }
 
-        self.client.empty(aligned_size)
+        self.backend.client().empty(aligned_size)
+    }
+
+    /// Get or allocate a typed buffer with the backend attached
+    pub fn get_or_alloc_buffer<E: CubeElement + CubePrimitive>(
+        &mut self,
+        shape: Vec<usize>,
+    ) -> Buffer<R, E> {
+        let len: usize = shape.iter().product();
+        let size_bytes = len * std::mem::size_of::<E>();
+        let handle = self.get_or_alloc(size_bytes);
+
+        let aligned_size = match self.strategy {
+            AllocationStrategy::Exact => size_bytes,
+            AllocationStrategy::Padded { alignment } => {
+                (size_bytes + alignment - 1) / alignment * alignment
+            }
+            AllocationStrategy::Pooled => size_bytes.next_power_of_two(),
+        };
+
+        let storage = Arc::new(Storage::new(handle, aligned_size));
+        Buffer::from_parts(
+            storage,
+            BufferView::contiguous(shape),
+            Some(self.backend.clone()),
+        )
     }
 
     pub fn return_buffer(&mut self, handle: Handle, size: usize) {

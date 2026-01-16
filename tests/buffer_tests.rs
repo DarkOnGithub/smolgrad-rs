@@ -555,6 +555,101 @@ mod backend_tests {
         assert!(contiguous.is_contiguous());
         assert!(contiguous.backend().is_some());
     }
+
+    // =========================================================================
+    // Tests for new Backend buffer creation methods
+    // =========================================================================
+
+    #[test]
+    fn test_backend_from_data() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let buffer = backend.from_data(&data, vec![2, 3]);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.backend().is_some());
+
+        let retrieved = buffer.to_data_auto().unwrap();
+        assert_eq!(data, retrieved);
+    }
+
+    #[test]
+    fn test_backend_empty() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let buffer: Buffer<TestRuntime, f32> = backend.empty(vec![3, 4]);
+
+        assert_eq!(buffer.shape(), &[3, 4]);
+        assert_eq!(buffer.len(), 12);
+        assert!(buffer.backend().is_some());
+        assert!(buffer.is_contiguous());
+    }
+
+    #[test]
+    fn test_backend_zeros() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let buffer: Buffer<TestRuntime, f32> = backend.zeros(vec![2, 3]);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.backend().is_some());
+
+        let data = buffer.to_data_auto().unwrap();
+        assert!(data.iter().all(|&x| x == 0.0));
+    }
+
+    #[test]
+    fn test_backend_ones() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let buffer: Buffer<TestRuntime, f32> = backend.ones(vec![2, 3]);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.backend().is_some());
+
+        let data = buffer.to_data_auto().unwrap();
+        assert!(data.iter().all(|&x| x == 1.0));
+    }
+
+    #[test]
+    fn test_backend_full() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let buffer: Buffer<TestRuntime, f32> = backend.full(vec![2, 3], 42.0);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.backend().is_some());
+
+        let data = buffer.to_data_auto().unwrap();
+        assert!(data.iter().all(|&x| x == 42.0));
+    }
+
+    #[test]
+    fn test_backend_chained_operations() {
+        // Test that backend methods integrate well with view operations
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let buffer: Buffer<TestRuntime, f32> =
+            backend.from_data(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]);
+
+        // Chain operations - backend should be preserved
+        let transposed = buffer.transpose().unwrap();
+        assert!(transposed.backend().is_some());
+
+        let reshaped = transposed
+            .contiguous_auto()
+            .unwrap()
+            .reshape(vec![6])
+            .unwrap();
+        assert!(reshaped.backend().is_some());
+    }
 }
 
 // =============================================================================
@@ -672,7 +767,7 @@ mod buffer_pool_tests {
     #[test]
     fn test_buffer_pool_exact() {
         let client = get_test_client();
-        let mut pool = BufferPool::new(client, AllocationStrategy::Exact);
+        let mut pool = BufferPool::from_client(client, AllocationStrategy::Exact);
 
         let handle = pool.get_or_alloc(1024);
         pool.return_buffer(handle, 1024);
@@ -684,7 +779,8 @@ mod buffer_pool_tests {
     #[test]
     fn test_buffer_pool_padded() {
         let client = get_test_client();
-        let mut pool = BufferPool::new(client, AllocationStrategy::Padded { alignment: 256 });
+        let mut pool =
+            BufferPool::from_client(client, AllocationStrategy::Padded { alignment: 256 });
 
         let handle = pool.get_or_alloc(100);
         pool.return_buffer(handle, 100);
@@ -696,7 +792,7 @@ mod buffer_pool_tests {
     #[test]
     fn test_buffer_pool_pooled() {
         let client = get_test_client();
-        let mut pool = BufferPool::new(client, AllocationStrategy::Pooled);
+        let mut pool = BufferPool::from_client(client, AllocationStrategy::Pooled);
 
         let handle = pool.get_or_alloc(100);
         pool.return_buffer(handle, 100);
@@ -708,7 +804,7 @@ mod buffer_pool_tests {
     #[test]
     fn test_buffer_pool_clear() {
         let client = get_test_client();
-        let mut pool = BufferPool::new(client, AllocationStrategy::Exact);
+        let mut pool = BufferPool::from_client(client, AllocationStrategy::Exact);
 
         let handle = pool.get_or_alloc(1024);
         pool.return_buffer(handle, 1024);
@@ -716,6 +812,32 @@ mod buffer_pool_tests {
 
         // After clear, should allocate new (but this is hard to test directly)
         let _handle2 = pool.get_or_alloc(1024);
+    }
+
+    #[test]
+    fn test_buffer_pool_get_backend() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+        let pool = BufferPool::new(backend.clone(), AllocationStrategy::Exact);
+
+        // Verify we can get the backend from the pool
+        let pool_backend = pool.backend();
+        let _ = pool_backend.client();
+    }
+
+    #[test]
+    fn test_buffer_pool_get_or_alloc_buffer() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+        let mut pool = BufferPool::new(backend, AllocationStrategy::Exact);
+
+        // Allocate a typed buffer with the pool's backend attached
+        let buffer: Buffer<TestRuntime, f32> = pool.get_or_alloc_buffer(vec![3, 4]);
+
+        assert_eq!(buffer.shape(), &[3, 4]);
+        assert_eq!(buffer.len(), 12);
+        assert!(buffer.backend().is_some());
+        assert!(buffer.is_contiguous());
     }
 }
 
