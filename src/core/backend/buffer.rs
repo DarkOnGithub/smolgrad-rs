@@ -181,4 +181,76 @@ impl<R: Runtime, E: CubeElement + CubePrimitive> Buffer<R, E> {
     }
 }
 
+/// Buffer allocation strategy for memory management
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllocationStrategy {
+    /// Allocate exactly what's needed
+    Exact,
+    /// Allocate with some padding for potential reuse
+    Padded {
+        /// Alignment in bytes for padding
+        alignment: usize,
+    },
+    /// Use a memory pool for frequent allocations
+    Pooled,
+}
+
+/// Memory pool for buffer allocation and reuse
+pub struct BufferPool<R: Runtime> {
+    /// Available buffers organized by size
+    available: std::collections::HashMap<usize, Vec<Handle>>,
+    client: ComputeClient<R>,
+    strategy: AllocationStrategy,
+}
+
+impl<R: Runtime> BufferPool<R> {
+    pub fn new(client: ComputeClient<R>, strategy: AllocationStrategy) -> Self {
+        BufferPool {
+            available: std::collections::HashMap::new(),
+            client,
+            strategy,
+        }
+    }
+
+    /// Get or allocate a buffer of the given size
+    pub fn get_or_alloc(&mut self, size: usize) -> Handle {
+        let aligned_size = match self.strategy {
+            AllocationStrategy::Exact => size,
+            AllocationStrategy::Padded { alignment } => {
+                (size + alignment - 1) / alignment * alignment
+            }
+            AllocationStrategy::Pooled => {
+                size.next_power_of_two()
+            }
+        };
+
+        if let Some(buffers) = self.available.get_mut(&aligned_size) {
+            if let Some(handle) = buffers.pop() {
+                return handle;
+            }
+        }
+
+        self.client.empty(aligned_size)
+    }
+
+    pub fn return_buffer(&mut self, handle: Handle, size: usize) {
+        let aligned_size = match self.strategy {
+            AllocationStrategy::Exact => size,
+            AllocationStrategy::Padded { alignment } => {
+                (size + alignment - 1) / alignment * alignment
+            }
+            AllocationStrategy::Pooled => size.next_power_of_two(),
+        };
+
+        self.available
+            .entry(aligned_size)
+            .or_insert_with(Vec::new)
+            .push(handle);
+    }
+
+    pub fn clear(&mut self) {
+        self.available.clear();
+    }
+}
+
 
