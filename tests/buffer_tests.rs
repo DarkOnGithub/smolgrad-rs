@@ -7,11 +7,15 @@
 //! 4. Type-erased DynBuffer for heterogeneous collections
 //! 5. View operations (reshape, transpose, slice, permute, squeeze, unsqueeze)
 //! 6. Contiguity checking
+//! 7. Broadcasting support
+//! 8. Alignment and Fortran layouts
+//! 9. Managed buffer pools with automatic recycling
 
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use smolgrad_rs::core::backend::{
-    AllocationStrategy, Backend, Buffer, BufferId, BufferPool, BufferView, DynBuffer, Storage,
+    AllocationStrategy, Backend, BroadcastMetadata, Buffer, BufferId, BufferPool, BufferView,
+    DynBuffer, ManagedBufferPool, Storage,
 };
 
 type TestRuntime = WgpuRuntime;
@@ -907,5 +911,308 @@ mod integration_tests {
         assert!(transposed.backend().is_some());
         assert!(reshaped.backend().is_some());
         assert!(sliced.backend().is_some());
+    }
+}
+
+// =============================================================================
+// Broadcasting Tests
+// =============================================================================
+
+mod broadcast_tests {
+    use super::*;
+
+    #[test]
+    fn test_broadcast_shape_same() {
+        let result = BufferView::broadcast_shape(&[2, 3], &[2, 3]);
+        assert_eq!(result, Some(vec![2, 3]));
+    }
+
+    #[test]
+    fn test_broadcast_shape_scalar() {
+        let result = BufferView::broadcast_shape(&[2, 3], &[1]);
+        assert_eq!(result, Some(vec![2, 3]));
+
+        let result = BufferView::broadcast_shape(&[1], &[2, 3]);
+        assert_eq!(result, Some(vec![2, 3]));
+    }
+
+    #[test]
+    fn test_broadcast_shape_different_ranks() {
+        let result = BufferView::broadcast_shape(&[2, 3], &[4, 2, 3]);
+        assert_eq!(result, Some(vec![4, 2, 3]));
+    }
+
+    #[test]
+    fn test_broadcast_shape_expansion() {
+        let result = BufferView::broadcast_shape(&[1, 3], &[2, 1]);
+        assert_eq!(result, Some(vec![2, 3]));
+    }
+
+    #[test]
+    fn test_broadcast_shape_incompatible() {
+        let result = BufferView::broadcast_shape(&[2, 3], &[2, 4]);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_broadcast_view() {
+        let view = BufferView::contiguous(vec![1, 3]);
+        let broadcasted = view.broadcast_to(&[2, 3]).unwrap();
+
+        assert_eq!(broadcasted.shape, vec![2, 3]);
+        assert_eq!(broadcasted.strides[0], 0); // Broadcasted dimension has stride 0
+        assert_eq!(broadcasted.strides[1], 1); // Original stride preserved
+    }
+
+    #[test]
+    fn test_broadcast_buffer() {
+        let client = get_test_client();
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let buffer = Buffer::<TestRuntime, f32>::from_data(&client, &data, vec![1, 3]);
+
+        let broadcasted = buffer.broadcast_to(&[4, 3]).unwrap();
+
+        assert_eq!(broadcasted.shape(), &[4, 3]);
+        assert!(broadcasted.shares_storage_with(&buffer));
+    }
+
+    #[test]
+    fn test_broadcast_metadata() {
+        let view_a = BufferView::contiguous(vec![2, 1]);
+        let view_b = BufferView::contiguous(vec![1, 3]);
+
+        let metadata = BroadcastMetadata::compute(&view_a, &view_b).unwrap();
+
+        assert_eq!(metadata.output_shape, vec![2, 3]);
+        assert!(metadata.a_broadcasts);
+        assert!(metadata.b_broadcasts);
+        assert_eq!(metadata.output_len(), 6);
+    }
+
+    #[test]
+    fn test_buffer_broadcast_metadata_with() {
+        let client = get_test_client();
+        let a = Buffer::<TestRuntime, f32>::zeros(&client, vec![2, 1]);
+        let b = Buffer::<TestRuntime, f32>::zeros(&client, vec![1, 3]);
+
+        let metadata = a.broadcast_metadata_with(&b).unwrap();
+
+        assert_eq!(metadata.output_shape, vec![2, 3]);
+    }
+}
+
+// =============================================================================
+// Alignment and Layout Tests
+// =============================================================================
+
+mod alignment_tests {
+    use super::*;
+
+    #[test]
+    fn test_fortran_strides() {
+        let strides = BufferView::compute_fortran_strides(&[2, 3, 4]);
+        assert_eq!(strides, vec![1, 2, 6]);
+    }
+
+    #[test]
+    fn test_fortran_contiguous_view() {
+        let view = BufferView::fortran_contiguous(vec![2, 3]);
+        assert_eq!(view.shape, vec![2, 3]);
+        assert_eq!(view.strides, vec![1, 2]);
+        assert!(view.is_fortran_contiguous());
+        assert!(!view.is_contiguous()); // Not C-contiguous
+    }
+
+    #[test]
+    fn test_aligned_strides() {
+        // For a [4, 4] matrix of f32 (4 bytes each), with 64-byte alignment
+        // Row should be padded to 64 bytes = 16 f32 elements
+        let strides = BufferView::compute_aligned_strides(&[4, 4], 4, 64);
+        assert_eq!(strides[1], 1); // Inner stride is always 1
+        assert_eq!(strides[0], 16); // Outer stride is 16 (64 bytes / 4 bytes per element)
+    }
+
+    #[test]
+    fn test_aligned_storage_size() {
+        let size = BufferView::compute_aligned_storage_size(&[4, 4], 4, 64);
+        assert_eq!(size, 4 * 16); // 4 rows * 16 elements per row
+    }
+
+    #[test]
+    fn test_empty_fortran_buffer() {
+        let client = get_test_client();
+        let buffer = Buffer::<TestRuntime, f32>::empty_fortran(&client, vec![2, 3]);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.is_fortran_contiguous());
+        assert!(!buffer.is_contiguous());
+    }
+
+    #[test]
+    fn test_empty_aligned_buffer() {
+        let client = get_test_client();
+        let buffer = Buffer::<TestRuntime, f32>::empty_aligned(&client, vec![4, 4], 64);
+
+        assert_eq!(buffer.shape(), &[4, 4]);
+        assert_eq!(buffer.strides()[0], 16); // Aligned stride
+    }
+}
+
+// =============================================================================
+// Buffer Operations Tests
+// =============================================================================
+
+mod buffer_ops_tests {
+    use super::*;
+
+    #[test]
+    fn test_filled_buffer() {
+        let client = get_test_client();
+        let buffer = Buffer::<TestRuntime, f32>::filled(&client, vec![2, 3], 42.0);
+
+        let data = buffer.to_data(&client);
+        assert_eq!(data.len(), 6);
+        assert!(data.iter().all(|&x| x == 42.0));
+    }
+
+    #[test]
+    fn test_filled_with_backend() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+        let buffer = Buffer::<TestRuntime, f32>::filled_with_backend(&backend, vec![2, 3], 7.5);
+
+        assert!(buffer.backend().is_some());
+        let data = buffer.to_data_auto().unwrap();
+        assert!(data.iter().all(|&x| x == 7.5));
+    }
+
+    #[test]
+    fn test_copy_from() {
+        let client = get_test_client();
+        let src_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let src = Buffer::<TestRuntime, f32>::from_data(&client, &src_data, vec![6]);
+        let mut dst = Buffer::<TestRuntime, f32>::empty(&client, vec![6]);
+
+        dst.copy_from(&client, &src);
+
+        let result = dst.to_data(&client);
+        assert_eq!(result, src_data);
+    }
+
+    #[test]
+    fn test_copy_from_auto() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+
+        let src_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let src = Buffer::<TestRuntime, f32>::from_data_with_backend(&backend, &src_data, vec![4]);
+        let mut dst = Buffer::<TestRuntime, f32>::empty_with_backend(&backend, vec![4]);
+
+        let success = dst.copy_from_auto(&src);
+        assert!(success);
+
+        let result = dst.to_data_auto().unwrap();
+        assert_eq!(result, src_data);
+    }
+}
+
+// =============================================================================
+// Managed Buffer Pool Tests
+// =============================================================================
+
+mod managed_pool_tests {
+    use super::*;
+
+    #[test]
+    fn test_managed_pool_creation() {
+        let client = get_test_client();
+        let pool =
+            ManagedBufferPool::<TestRuntime>::from_client(client, AllocationStrategy::Pooled);
+
+        let stats = pool.stats();
+        assert_eq!(stats.available_handles, 0);
+    }
+
+    #[test]
+    fn test_managed_pool_alloc() {
+        let client = get_test_client();
+        let pool =
+            ManagedBufferPool::<TestRuntime>::from_client(client, AllocationStrategy::Pooled);
+
+        let buffer = pool.alloc::<f32>(vec![2, 3]);
+
+        assert_eq!(buffer.shape(), &[2, 3]);
+        assert!(buffer.backend().is_some());
+        assert!(buffer.is_contiguous());
+    }
+
+    #[test]
+    fn test_managed_pool_recycling() {
+        let client = get_test_client();
+        let pool =
+            ManagedBufferPool::<TestRuntime>::from_client(client, AllocationStrategy::Pooled);
+
+        // Allocate and drop a buffer
+        {
+            let _buffer = pool.alloc::<f32>(vec![4, 4]);
+            // Buffer dropped here, should be returned to pool
+        }
+
+        // The handle should be returned to the pool
+        let stats = pool.stats();
+        assert_eq!(stats.available_handles, 1);
+    }
+
+    #[test]
+    fn test_managed_pool_reuse() {
+        let client = get_test_client();
+        let pool =
+            ManagedBufferPool::<TestRuntime>::from_client(client, AllocationStrategy::Pooled);
+
+        // Allocate and drop
+        {
+            let _buffer = pool.alloc::<f32>(vec![4, 4]);
+        }
+
+        // Allocate again - should reuse
+        let stats_before = pool.stats();
+        assert_eq!(stats_before.available_handles, 1);
+
+        let _buffer2 = pool.alloc::<f32>(vec![4, 4]);
+
+        let stats_after = pool.stats();
+        assert_eq!(stats_after.available_handles, 0);
+    }
+
+    #[test]
+    fn test_pooled_buffer_data_roundtrip() {
+        let client = get_test_client();
+        let backend = Backend::new(client);
+        let pool = ManagedBufferPool::<TestRuntime>::new(backend, AllocationStrategy::Pooled);
+
+        let buffer = pool.alloc::<f32>(vec![2, 3]);
+
+        // Verify we can read data from the pooled buffer
+        let read_data = buffer.to_data_auto();
+        assert!(read_data.is_some());
+        assert_eq!(read_data.unwrap().len(), 6);
+    }
+
+    #[test]
+    fn test_pool_clear() {
+        let client = get_test_client();
+        let pool =
+            ManagedBufferPool::<TestRuntime>::from_client(client, AllocationStrategy::Pooled);
+
+        // Allocate and drop
+        {
+            let _buffer = pool.alloc::<f32>(vec![4, 4]);
+        }
+
+        assert_eq!(pool.stats().available_handles, 1);
+
+        pool.clear();
+
+        assert_eq!(pool.stats().available_handles, 0);
     }
 }
