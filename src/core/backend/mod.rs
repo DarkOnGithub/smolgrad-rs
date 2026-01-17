@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod executor;
 pub mod kernels;
 
 pub use buffer::{

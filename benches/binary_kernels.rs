@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use cubecl::prelude::*;
 use cubecl::wgpu::{WgpuDevice, WgpuRuntime};
 use smolgrad_rs::core::backend::kernels::binary;
-use smolgrad_rs::core::backend::{Buffer, Backend};
+use smolgrad_rs::core::backend::{Backend, Buffer};
 
 type TestRuntime = WgpuRuntime;
 
@@ -14,16 +14,16 @@ fn get_test_client() -> ComputeClient<TestRuntime> {
 fn bench_binary_ops(c: &mut Criterion) {
     let client = get_test_client();
     let backend = Backend::new(client.clone());
-    
+
     let sizes = [1024, 1024 * 1024];
     let mut group = c.benchmark_group("binary_ops");
-    
+
     for size in sizes {
         let shape = vec![size];
         let lhs = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, shape.clone());
         let rhs = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, shape.clone());
         let mut out = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, shape.clone());
-        
+
         let element_size = std::mem::size_of::<f32>() as u64;
         group.throughput(Throughput::Bytes(size as u64 * element_size * 3)); // 2 reads, 1 write
 
@@ -63,15 +63,15 @@ fn bench_binary_ops(c: &mut Criterion) {
 fn bench_broadcasting(c: &mut Criterion) {
     let client = get_test_client();
     let backend = Backend::new(client.clone());
-    
+
     let mut group = c.benchmark_group("broadcasting");
-    
+
     let n = 1024;
     // [1024, 1] + [1, 1024] -> [1024, 1024]
     let lhs = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, vec![n, 1]);
     let rhs = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, vec![1, n]);
     let mut out = Buffer::<TestRuntime, f32>::zeros_with_backend(&backend, vec![n, n]);
-    
+
     let element_size = std::mem::size_of::<f32>() as u64;
     group.throughput(Throughput::Bytes((n * n) as u64 * element_size * 3));
 
@@ -80,7 +80,7 @@ fn bench_broadcasting(c: &mut Criterion) {
             binary::launch_add(&client, &lhs, &rhs, &mut out, 1);
         });
     });
-    
+
     group.finish();
 }
 
