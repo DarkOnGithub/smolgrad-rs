@@ -1,4 +1,5 @@
 pub mod buffer;
+pub mod kernels;
 
 pub use buffer::{
     AllocationStrategy, Backend, BroadcastMetadata, Buffer, BufferId, BufferPool, BufferView,

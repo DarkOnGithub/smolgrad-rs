@@ -1,7 +1,7 @@
-use cubecl::prelude::*;
-use std::any::Any;
 use crate::core::backend::buffer::buffer::Buffer;
 use crate::core::backend::buffer::id::BufferId;
+use cubecl::prelude::*;
+use std::any::Any;
 
 pub trait DynBufferOps<R: Runtime>: Send + Sync {
     fn shape(&self) -> &[usize];

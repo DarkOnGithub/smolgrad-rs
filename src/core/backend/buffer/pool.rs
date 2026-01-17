@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use crate::core::backend::buffer::backend::Backend;
 use crate::core::backend::buffer::buffer::Buffer;
-use crate::core::backend::buffer::storage::{Storage, PooledStorage, HandleRecycler};
+use crate::core::backend::buffer::storage::{HandleRecycler, PooledStorage, Storage};
 use crate::core::backend::buffer::view::BufferView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

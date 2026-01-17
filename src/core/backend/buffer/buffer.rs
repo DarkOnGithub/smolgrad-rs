@@ -3,11 +3,11 @@ use cubecl::server::Handle;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::core::backend::buffer::id::BufferId;
-use crate::core::backend::buffer::storage::Storage;
-use crate::core::backend::buffer::view::{BufferView, BroadcastMetadata};
 use crate::core::backend::buffer::backend::Backend;
+use crate::core::backend::buffer::id::BufferId;
 use crate::core::backend::buffer::kernels;
+use crate::core::backend::buffer::storage::Storage;
+use crate::core::backend::buffer::view::{BroadcastMetadata, BufferView};
 
 /// A GPU buffer with reference counting for zero-copy operations.
 #[derive(Debug)]
@@ -363,7 +363,6 @@ impl<R: Runtime, E: CubeElement + CubePrimitive> Buffer<R, E> {
             )
         }
     }
-
 
     /// Fill the buffer with a constant value
     pub fn filled(client: &ComputeClient<R>, shape: Vec<usize>, value: E) -> Self

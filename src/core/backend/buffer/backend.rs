@@ -1,6 +1,6 @@
+use crate::core::backend::buffer::buffer::Buffer;
 use cubecl::prelude::*;
 use std::sync::Arc;
-use crate::core::backend::buffer::buffer::Buffer;
 
 /// A reference-counted backend context that wraps the ComputeClient.
 pub struct Backend<R: Runtime> {

@@ -1,8 +1,8 @@
+use crate::core::backend::buffer::id::BufferId;
 use cubecl::prelude::*;
 use cubecl::server::Handle;
 use std::marker::PhantomData;
 use std::sync::Weak;
-use crate::core::backend::buffer::id::BufferId;
 
 /// Physical GPU memory storage (the raw allocation)
 #[derive(Debug)]
